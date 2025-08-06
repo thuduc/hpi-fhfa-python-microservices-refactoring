@@ -1,0 +1,255 @@
+version: '3.8'
+
+services:
+  # Infrastructure Services
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: rsai
+      POSTGRES_USER: rsai
+      POSTGRES_PASSWORD: rsai_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rsai"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=true
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./services/api-gateway:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Data Ingestion Service
+  data-ingestion:
+    build:
+      context: ./services/data-ingestion
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_ingestion
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/data-ingestion:/app
+      - upload_data:/tmp/rsai-uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Data Validation Service
+  data-validation:
+    build:
+      context: ./services/data-validation
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_validation
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/data-validation:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Geography Service
+  geography:
+    build:
+      context: ./services/geography
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_geography
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/geography:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Index Calculation Service
+  index-calculation:
+    build:
+      context: ./services/index-calculation
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_index
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/index-calculation:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Export Service
+  export:
+    build:
+      context: ./services/export
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_export
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/export:/app
+      - export_data:/tmp/rsai-exports
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Orchestration Service
+  orchestration:
+    build:
+      context: ./services/orchestration
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8006"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_orchestration
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/3
+      - CELERY_RESULT_BACKEND=redis://redis:6379/4
+    depends_on:
+      - postgres
+      - redis
+      - data-ingestion
+      - data-validation
+      - geography
+      - index-calculation
+      - export
+    volumes:
+      - ./services/orchestration:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Configuration Service
+  configuration:
+    build:
+      context: ./services/configuration
+      dockerfile: Dockerfile
+    ports:
+      - "8007:8007"
+    environment:
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://rsai:rsai_password@postgres:5432/rsai_config
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/configuration:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring and Observability
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  upload_data:
+  export_data:
+
+networks:
+  default:
+    name: rsai-microservices
+    driver: bridge
